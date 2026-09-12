@@ -110,8 +110,12 @@ function sanitize(input, existing = {}) {
 
 async function ensureDb(env) {
   if (!env.DB) return false;
-  await env.DB.exec(`
-    CREATE TABLE IF NOT EXISTS poems (
+
+  // D1Database.exec() treats newlines as statement separators, so a multi-line
+  // CREATE TABLE can be split into invalid fragments. Execute each complete
+  // schema statement independently instead.
+  const schemaStatements = [
+    `CREATE TABLE IF NOT EXISTS poems (
       id INTEGER PRIMARY KEY,
       slug TEXT NOT NULL,
       title TEXT NOT NULL,
@@ -126,12 +130,22 @@ async function ensureDb(env) {
       featured INTEGER NOT NULL DEFAULT 0,
       note TEXT NOT NULL DEFAULT '',
       updatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT NOT NULL, attempted_at INTEGER NOT NULL);
-    CREATE INDEX IF NOT EXISTS idx_poems_collection ON poems(collectionSlug);
-    CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip, attempted_at);
-  `);
+    )`,
+    `CREATE TABLE IF NOT EXISTS meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS login_attempts (
+      ip TEXT NOT NULL,
+      attempted_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_poems_collection ON poems(collectionSlug)`,
+    `CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip, attempted_at)`
+  ];
+
+  for (const statement of schemaStatements) {
+    await env.DB.prepare(statement).run();
+  }
   const seeded = await env.DB.prepare("SELECT value FROM meta WHERE key='seeded_v1'").first();
   if (!seeded) {
     const stmts = SEED_POEMS.map(p => env.DB.prepare(`
