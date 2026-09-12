@@ -1,6 +1,6 @@
 {
   "name": "vitamin-poetry-cloudflare",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "维生素个人文学网站 · Cloudflare Pages + Functions + D1",
   "scripts": {

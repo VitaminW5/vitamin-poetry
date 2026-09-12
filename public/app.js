@@ -2,7 +2,7 @@ const $ = (s, el=document) => el.querySelector(s);
 const $$ = (s, el=document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 const app = $('#app');
-let site = null, poems = [], session = {authenticated:false,adminEnabled:false};
+let site = null, poems = [], session = {authenticated:false,csrf:null};
 
 const collections = {
   weiyan:{name:'微言小谈',kind:'古体诗词',desc:'格律、旧典、长夜与偶然落下的几行。'},
@@ -11,7 +11,10 @@ const collections = {
 };
 
 async function api(url, opts={}){
-  const res = await fetch(url,{headers:{'Content-Type':'application/json',...(opts.headers||{})},...opts});
+  const method=(opts.method||'GET').toUpperCase();
+  const headers={'Content-Type':'application/json',...(opts.headers||{})};
+  if(!['GET','HEAD','OPTIONS'].includes(method) && session.csrf) headers['X-CSRF-Token']=session.csrf;
+  const res = await fetch(url,{...opts,method,headers,credentials:'same-origin'});
   const data = await res.json().catch(()=>({}));
   if(!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
   return data;
@@ -28,7 +31,7 @@ function nav(active=''){
     <a data-link class="${active==='about'?'active':''}" href="/about">关于</a>
   </div><span class="nav-more">97 PIECES</span></div></nav>`;
 }
-function footer(){return `<footer class="wrap footer"><span>© 维生素</span><span><a data-link href="/studio">Studio</a> · 诗 / 词 / 未成曲调</span></footer>`}
+function footer(){return `<footer class="wrap footer"><span>© 维生素</span><span>诗 / 词 / 未成曲调</span></footer>`}
 function layout(content,active=''){app.innerHTML=`<div class="shell">${nav(active)}${content}${footer()}</div>`}
 function posterCard(p){return `<a data-link class="poster-card" href="/poem/${p.id}" aria-label="${esc(p.title)}"><img loading="lazy" src="${p.poster}" alt="${esc(p.title)} 海报"><span class="poster-no">${String(p.id).padStart(2,'0')}</span><span class="poster-meta"><b>${esc(p.title)}</b><small>${esc(p.collection)} · ${esc(p.kind)}</small></span></a>`}
 function randomPoem(except){const pool=poems.filter(p=>p.id!==except);return pool[Math.floor(Math.random()*pool.length)]}
@@ -64,8 +67,8 @@ function notFound(){layout(`<main class="wrap about"><div class="kicker">404</di
 async function loginPage(){
   session=await api('/api/session');
   if(session.authenticated) return studioPage();
-  app.innerHTML=`<div class="shell">${nav()}<main class="login-wrap"><form class="login-card" id="loginForm"><div class="kicker">PRIVATE STUDIO</div><h1>后台登录</h1><p>这里只用于“维生素”本人管理作品。访客无需登录即可阅读全部已发布内容。</p>${!session.adminEnabled?'<div class="notice">当前服务器尚未配置后台密码。请先设置 VITAMIN_ADMIN_PASSWORD。</div>':''}<div id="loginError"></div><div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" required></div><button class="btn primary" ${session.adminEnabled?'':'disabled'}>进入 Studio</button></form></main>${footer()}</div>`;
-  $('#loginForm').onsubmit=async e=>{e.preventDefault();$('#loginError').innerHTML='';try{await api('/api/login',{method:'POST',body:JSON.stringify({password:e.target.password.value})});session.authenticated=true;studioPage()}catch(err){$('#loginError').innerHTML=`<div class="notice">${esc(err.message)}</div>`}};
+  app.innerHTML=`<div class="shell">${nav()}<main class="login-wrap"><form class="login-card" id="loginForm"><div class="kicker">PRIVATE STUDIO</div><h1>后台登录</h1><p>此入口仅用于作者管理作品。</p><div id="loginError"></div><div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" required autofocus></div><button class="btn primary">进入 Studio</button></form></main>${footer()}</div>`;
+  $('#loginForm').onsubmit=async e=>{e.preventDefault();$('#loginError').innerHTML='';const btn=e.target.querySelector('button');btn.disabled=true;try{const result=await api('/api/login',{method:'POST',body:JSON.stringify({password:e.target.password.value})});session={authenticated:true,csrf:result.csrf||null};studioPage()}catch(err){$('#loginError').innerHTML=`<div class="notice">${esc(err.message)}</div>`;btn.disabled=false}};
 }
 
 async function studioPage(){
@@ -83,7 +86,7 @@ async function studioPage(){
     $$('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;renderStudio()});
     $$('.admin-row').forEach(r=>r.onclick=()=>{selected=Number(r.dataset.id);renderStudio()});
     $('#adminSearch').oninput=e=>{const q=e.target.value.trim().toLowerCase();const base=adminPoems.filter(p=>filter==='all'||p.collectionSlug===filter);const list=base.filter(p=>p.title.toLowerCase().includes(q)||p.content.toLowerCase().includes(q));$('#adminList').innerHTML=adminRows(list);$$('.admin-row').forEach(r=>r.onclick=()=>{selected=Number(r.dataset.id);renderStudio()});$('.panel-head .count').textContent=list.length};
-    $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:'{}'});session.authenticated=false;route('/')};
+    $('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:'{}'});session={authenticated:false,csrf:null};route('/')};
     $('#newPoem').onclick=()=>newPoemDialog();
     const form=$('#editor'); if(form) form.onsubmit=async e=>{e.preventDefault();const f=new FormData(form);const payload={title:f.get('title'),collection:f.get('collection'),dateLabel:f.get('dateLabel'),content:f.get('content'),poster:f.get('poster'),background:f.get('background'),published:form.published.checked,featured:form.featured.checked};try{const updated=await api('/api/admin/poems/'+selected,{method:'PUT',body:JSON.stringify(payload)});adminPoems=adminPoems.map(p=>p.id===selected?updated:p);poems=await api('/api/poems');toast('已保存');renderStudio()}catch(err){toast(err.message)}};
   }

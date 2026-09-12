@@ -8,6 +8,9 @@ const COLLECTION_META = {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const SESSION_COOKIE = '__Host-vitamin_session';
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE = 24 * 60 * 60;
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
@@ -57,21 +60,49 @@ async function signSession(secret, payload) {
 }
 
 async function verifySession(secret, token) {
-  if (!secret || !token || !token.includes('.')) return false;
+  if (!secret || !token || !token.includes('.')) return null;
   const [data, sig] = token.split('.');
   try {
     const key = await hmacKey(secret);
     const ok = await crypto.subtle.verify('HMAC', key, base64UrlToBytes(sig), enc.encode(data));
-    if (!ok) return false;
+    if (!ok) return null;
     const payload = JSON.parse(dec.decode(base64UrlToBytes(data)));
-    return payload.role === 'admin' && Number(payload.exp) > Date.now();
+    if (payload.role !== 'admin' || Number(payload.exp) <= Date.now() || !payload.csrf) return null;
+    return payload;
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
+async function getAdminSession(request, env) {
+  return verifySession(env.VITAMIN_SESSION_SECRET || '', parseCookies(request)[SESSION_COOKIE] || '');
+}
+
 async function isAdmin(request, env) {
-  return verifySession(env.VITAMIN_SESSION_SECRET || '', parseCookies(request).vitamin_session || '');
+  return Boolean(await getAdminSession(request, env));
+}
+
+function randomToken(bytes = 24) {
+  const out = new Uint8Array(bytes);
+  crypto.getRandomValues(out);
+  return bytesToBase64Url(out);
+}
+
+async function sha256(text) {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(String(text))));
+}
+
+async function secureEqualString(a, b) {
+  const [ha, hb] = await Promise.all([sha256(a), sha256(b)]);
+  let diff = ha.length ^ hb.length;
+  const len = Math.max(ha.length, hb.length);
+  for (let i = 0; i < len; i++) diff |= (ha[i % ha.length] ^ hb[i % hb.length]);
+  return diff === 0;
+}
+
+function validCsrf(request, session) {
+  const token = request.headers.get('X-CSRF-Token') || '';
+  return Boolean(session?.csrf && token && token === session.csrf);
 }
 
 function asPoem(row) {
@@ -226,7 +257,7 @@ async function loginAllowed(env, ip) {
   const cutoff = Date.now() - 15 * 60 * 1000;
   await env.DB.prepare('DELETE FROM login_attempts WHERE attempted_at < ?').bind(cutoff).run();
   const row = await env.DB.prepare('SELECT COUNT(*) AS c FROM login_attempts WHERE ip=?').bind(ip).first();
-  return Number(row?.c || 0) < 10;
+  return Number(row?.c || 0) < 5;
 }
 
 async function recordLoginFailure(env, ip) {
@@ -251,15 +282,14 @@ export async function onRequest(context) {
   const path = url.pathname;
   const method = request.method.toUpperCase();
   try {
+    if (!['GET', 'HEAD', 'POST', 'PUT', 'OPTIONS'].includes(method)) {
+      return json({ error: 'Method not allowed' }, 405, { 'Allow': 'GET, HEAD, POST, PUT, OPTIONS' });
+    }
     if (method === 'GET' && path === '/api/site') return json(SITE);
 
     if (method === 'GET' && path === '/api/session') {
-      const authenticated = await isAdmin(request, env);
-      return json({
-        authenticated,
-        adminEnabled: Boolean(env.VITAMIN_ADMIN_PASSWORD && env.VITAMIN_SESSION_SECRET && env.DB),
-        databaseReady: Boolean(env.DB)
-      });
+      const adminSession = await getAdminSession(request, env);
+      return json(adminSession ? { authenticated: true, csrf: adminSession.csrf } : { authenticated: false });
     }
 
     if (method === 'POST' && path === '/api/login') {
@@ -271,20 +301,25 @@ export async function onRequest(context) {
       const ip = getIp(request);
       if (!(await loginAllowed(env, ip))) return json({ error: '登录尝试过于频繁，请稍后再试。' }, 429);
       const body = await readBody(request);
-      if (String(body.password || '') !== String(env.VITAMIN_ADMIN_PASSWORD)) {
+      if (!(await secureEqualString(String(body.password || ''), String(env.VITAMIN_ADMIN_PASSWORD)))) {
         await recordLoginFailure(env, ip);
         return json({ error: '密码错误' }, 401);
       }
       await clearLoginFailures(env, ip);
-      const token = await signSession(env.VITAMIN_SESSION_SECRET, { role: 'admin', exp: Date.now() + 7 * 24 * 60 * 60 * 1000 });
-      return json({ ok: true }, 200, {
-        'Set-Cookie': `vitamin_session=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${7*24*60*60}`
+      const csrf = randomToken();
+      const now = Date.now();
+      const token = await signSession(env.VITAMIN_SESSION_SECRET, { role: 'admin', csrf, iat: now, exp: now + SESSION_TTL_MS });
+      return json({ ok: true, csrf }, 200, {
+        'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE}; Priority=High`
       });
     }
 
     if (method === 'POST' && path === '/api/logout') {
+      if (!sameOrigin(request)) return json({ error: '非法请求来源' }, 403);
+      const adminSession = await getAdminSession(request, env);
+      if (adminSession && !validCsrf(request, adminSession)) return json({ error: 'CSRF 校验失败' }, 403);
       return json({ ok: true }, 200, {
-        'Set-Cookie': 'vitamin_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0'
+        'Set-Cookie': `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0; Priority=High`
       });
     }
 
@@ -305,8 +340,12 @@ export async function onRequest(context) {
 
     if (path.startsWith('/api/admin/')) {
       if (!env.DB) return json({ error: 'D1 数据库尚未绑定。' }, 503);
-      if (!(await isAdmin(request, env))) return json({ error: '未登录或登录已失效' }, 401);
+      const adminSession = await getAdminSession(request, env);
+      if (!adminSession) return json({ error: '未登录或登录已失效' }, 401);
       if (!sameOrigin(request)) return json({ error: '非法请求来源' }, 403);
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !validCsrf(request, adminSession)) {
+        return json({ error: 'CSRF 校验失败，请刷新后台后重试。' }, 403);
+      }
       await ensureDb(env);
     }
 
