@@ -1,0 +1,26 @@
+{
+  "author": "维生素",
+  "siteTitle": "维生素",
+  "subtitle": "一些从 2021 年开始写下的句子。",
+  "quote": "文字是我抵抗世界的维生素。",
+  "collections": [
+    {
+      "name": "微言小谈",
+      "slug": "weiyan",
+      "kind": "古体诗词",
+      "description": "格律、旧典、长夜与偶然落下的几行。"
+    },
+    {
+      "name": "乱章杂句",
+      "slug": "luanzhang",
+      "kind": "歌词",
+      "description": "借曲成句，也收下尚未真正唱出的告别。"
+    },
+    {
+      "name": "未成曲调",
+      "slug": "weicheng",
+      "kind": "现代诗",
+      "description": "节奏仍在，但不必被旋律规定去向。"
+    }
+  ]
+}
