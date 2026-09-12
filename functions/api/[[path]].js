@@ -148,27 +148,66 @@ async function ensureDb(env) {
   }
   const seeded = await env.DB.prepare("SELECT value FROM meta WHERE key='seeded_v1'").first();
   if (!seeded) {
-    const stmts = SEED_POEMS.map(p => env.DB.prepare(`
-      INSERT OR IGNORE INTO poems
-      (id,slug,title,collection,collectionSlug,kind,content,dateLabel,poster,background,published,featured,note)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).bind(
-      p.id, p.slug || String(p.id).padStart(2,'0'), p.title, p.collection, p.collectionSlug, p.kind,
-      p.content, p.dateLabel || '时间未考', p.poster || '', p.background || '', p.published ? 1 : 0,
-      p.featured ? 1 : 0, p.note || ''
-    ));
-    stmts.push(env.DB.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_v1','1')"));
-    await env.DB.batch(stmts);
+    // D1 Free allows at most 50 database queries per Worker invocation and
+    // at most 100 bound parameters per SQL statement. One poem uses 13
+    // bound values, so seed in groups of 7 poems (91 parameters/query).
+    // This turns 97 individual INSERT statements into only 14 INSERTs.
+    const cols = '(id,slug,title,collection,collectionSlug,kind,content,dateLabel,poster,background,published,featured,note)';
+    const rowPlaceholders = '(?,?,?,?,?,?,?,?,?,?,?,?,?)';
+    const chunkSize = 7;
+    const seedStatements = [];
+
+    for (let start = 0; start < SEED_POEMS.length; start += chunkSize) {
+      const chunk = SEED_POEMS.slice(start, start + chunkSize);
+      const valuesSql = chunk.map(() => rowPlaceholders).join(',');
+      const params = [];
+      for (const p of chunk) {
+        params.push(
+          p.id,
+          p.slug || String(p.id).padStart(2, '0'),
+          p.title,
+          p.collection,
+          p.collectionSlug,
+          p.kind,
+          p.content,
+          p.dateLabel || '时间未考',
+          p.poster || '',
+          p.background || '',
+          p.published ? 1 : 0,
+          p.featured ? 1 : 0,
+          p.note || ''
+        );
+      }
+      seedStatements.push(
+        env.DB.prepare(`INSERT OR IGNORE INTO poems ${cols} VALUES ${valuesSql}`).bind(...params)
+      );
+    }
+
+    seedStatements.push(
+      env.DB.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_v1','1')")
+    );
+    await env.DB.batch(seedStatements);
   }
   return true;
 }
 
 async function readPoems(env, includeDrafts = false) {
-  if (!env.DB) return SEED_POEMS.filter(p => includeDrafts || p.published).map(p => ({ ...p }));
-  await ensureDb(env);
-  const sql = includeDrafts ? 'SELECT * FROM poems ORDER BY id' : 'SELECT * FROM poems WHERE published=1 ORDER BY id';
-  const result = await env.DB.prepare(sql).all();
-  return (result.results || []).map(asPoem);
+  const seedFallback = () => SEED_POEMS.filter(p => includeDrafts || p.published).map(p => ({ ...p }));
+  if (!env.DB) return seedFallback();
+  try {
+    await ensureDb(env);
+    const sql = includeDrafts ? 'SELECT * FROM poems ORDER BY id' : 'SELECT * FROM poems WHERE published=1 ORDER BY id';
+    const result = await env.DB.prepare(sql).all();
+    return (result.results || []).map(asPoem);
+  } catch (err) {
+    // Public reading should never be taken offline by a D1 initialization
+    // problem. Admin reads still surface the database error so it can be fixed.
+    if (!includeDrafts) {
+      console.error('D1 public-read fallback:', err);
+      return seedFallback();
+    }
+    throw err;
+  }
 }
 
 async function readBody(request) {
