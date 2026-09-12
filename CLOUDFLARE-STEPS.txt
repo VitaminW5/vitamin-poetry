@@ -1,0 +1,15 @@
+维生素 V1.4 免费公网部署顺序
+
+1. 用本文件夹内容覆盖 GitHub 仓库 vitamin-poetry，并 Push。
+2. Cloudflare → Workers & Pages → Create → Pages → Connect to Git。
+3. 选 VitaminW5/vitamin-poetry。
+4. Framework preset: None。
+5. Build command: exit 0。
+6. Build output directory: public。
+7. Deploy。
+8. 先打开 pages.dev 地址，前台应能直接看到 97 篇。
+9. 新建 D1 数据库 vitamin-poetry-db。
+10. Pages Settings → Bindings → D1，变量名必须是 DB。
+11. Settings → Variables and Secrets，添加并加密 VITAMIN_ADMIN_PASSWORD 和 VITAMIN_SESSION_SECRET。
+12. Redeploy。
+13. 打开 /studio，用后台密码登录。

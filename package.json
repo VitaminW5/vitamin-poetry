@@ -1,12 +1,9 @@
 {
-  "name": "vitamin-poetry-site",
-  "version": "1.3.0",
+  "name": "vitamin-poetry-cloudflare",
+  "version": "1.4.0",
   "private": true,
-  "description": "维生素个人文学网站",
-  "engines": {
-    "node": ">=18"
-  },
+  "description": "维生素个人文学网站 · Cloudflare Pages + Functions + D1",
   "scripts": {
-    "start": "node server.js"
+    "check": "node --check functions/api/[[path]].js && node --check functions/_lib/seed.js"
   }
 }
